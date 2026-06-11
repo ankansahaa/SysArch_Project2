@@ -32,7 +32,17 @@ class ControlUnit extends AbstractControlUnit {
   when(was_stalled === STALL_REASON.EXECUTION_UNIT) {
     when(io_ctrl.data_gnt) {
       stalled := STALL_REASON.NO_STALL
-      io_ctrl.reg_we := true.B
+      when(RISCV_TYPE.getOP(io_ctrl.instr_type) === RISCV_OP.LOAD) {
+        io_ctrl.reg_we := true.B
+        switch(RISCV_TYPE.getFunct3(io_ctrl.instr_type)) {
+          is(RISCV_FUNCT3.F000, RISCV_FUNCT3.F001) {
+            io_ctrl.reg_write_sel := REG_WRITE_SEL.MEM_OUT_SIGN_EXTENDED
+          }
+          is(RISCV_FUNCT3.F010, RISCV_FUNCT3.F100, RISCV_FUNCT3.F101) {
+            io_ctrl.reg_write_sel := REG_WRITE_SEL.MEM_OUT_ZERO_EXTENDED
+          }
+        }
+      }
     }
   }.otherwise {
     switch(RISCV_TYPE.getOP(io_ctrl.instr_type)) {

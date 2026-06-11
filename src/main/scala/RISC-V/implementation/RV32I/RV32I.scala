@@ -75,44 +75,22 @@ class RV32I(
     }
     // ----- Load instructions: zero-extended -----
     is(REG_WRITE_SEL.MEM_OUT_ZERO_EXTENDED) {
-      val addr_low = alu.io_alu.result(1, 0)
       val raw = io_data.data_rdata
-      val byte_data = MuxCase(
-        0.U(8.W),
-        Seq(
-          (addr_low === 0.U) -> raw(7, 0),
-          (addr_low === 1.U) -> raw(15, 8),
-          (addr_low === 2.U) -> raw(23, 16),
-          (addr_low === 3.U) -> raw(31, 24)
-        )
-      )
-      val halfword_data = Mux(addr_low === 0.U, raw(15, 0), raw(31, 16))
       when(RISCV_TYPE.getFunct3(instr_type) === RISCV_FUNCT3.F010) {
         io_reg.reg_write_data := raw
       }.elsewhen(RISCV_TYPE.getFunct3(instr_type) === RISCV_FUNCT3.F100) {
-        io_reg.reg_write_data := byte_data
+        io_reg.reg_write_data := raw(7, 0)
       }.elsewhen(RISCV_TYPE.getFunct3(instr_type) === RISCV_FUNCT3.F101) {
-        io_reg.reg_write_data := halfword_data
+        io_reg.reg_write_data := raw(15, 0)
       }
     }
     // ----- Load instructions: sign-extended -----
     is(REG_WRITE_SEL.MEM_OUT_SIGN_EXTENDED) {
-      val addr_low = alu.io_alu.result(1, 0)
       val raw = io_data.data_rdata
-      val byte_data = MuxCase(
-        0.U(8.W),
-        Seq(
-          (addr_low === 0.U) -> raw(7, 0),
-          (addr_low === 1.U) -> raw(15, 8),
-          (addr_low === 2.U) -> raw(23, 16),
-          (addr_low === 3.U) -> raw(31, 24)
-        )
-      )
-      val halfword_data = Mux(addr_low === 0.U, raw(15, 0), raw(31, 16))
       when(RISCV_TYPE.getFunct3(instr_type) === RISCV_FUNCT3.F000) {
-        io_reg.reg_write_data := byte_data.asSInt.pad(32).asUInt
+        io_reg.reg_write_data := raw(7, 0).asSInt.pad(32).asUInt
       }.elsewhen(RISCV_TYPE.getFunct3(instr_type) === RISCV_FUNCT3.F001) {
-        io_reg.reg_write_data := halfword_data.asSInt.pad(32).asUInt
+        io_reg.reg_write_data := raw(15, 0).asSInt.pad(32).asUInt
       }
     }
   }
@@ -139,7 +117,15 @@ class RV32I(
   io_data.data_addr := alu.io_alu.result
   io_data.data_be := control_unit.io_ctrl.data_be
   io_data.data_we := control_unit.io_ctrl.data_we
-  io_data.data_wdata := io_reg.reg_read_data2
+  io_data.data_wdata := MuxCase(
+    io_reg.reg_read_data2,
+    Seq(
+      (RISCV_TYPE.getFunct3(instr_type) === RISCV_FUNCT3.F000) -> io_reg
+        .reg_read_data2(7, 0),
+      (RISCV_TYPE.getFunct3(instr_type) === RISCV_FUNCT3.F001) -> io_reg
+        .reg_read_data2(15, 0)
+    )
+  )
 
   io_trap.trap_valid := false.B
   io_trap.trap_reason := TRAP_REASON.NONE

@@ -36,6 +36,8 @@ class FIFOCache(capacity: Int) extends AbstractCache {
         val hitVec = Cat(hitIndex.reverse)
         when(hitVec.orR) {
           val idx = OHToUInt(hitVec)
+          core_io.data_gnt := true.B
+          core_io.data_rdata := data(idx)
           when(core_io.data_we) {
             val mask = Cat(
               Fill(8, core_io.data_be(3)),
@@ -45,15 +47,6 @@ class FIFOCache(capacity: Int) extends AbstractCache {
             )
             data(idx) := (mask & core_io.data_wdata) | (~mask & data(idx))
           }
-          reqAddr := core_io.data_addr
-          reqBe := core_io.data_be
-          reqWe := core_io.data_we
-          reqWdata := core_io.data_wdata
-          reqCoreGnt := true.B
-          state := CACHE_STATE.WRITE
-          core_io.data_rdata := data(
-            idx
-          ) // for reads, return cached data; for writes, irrelevant but set anyway
         }.otherwise {
           reqAddr := core_io.data_addr
           reqBe := core_io.data_be
@@ -66,7 +59,6 @@ class FIFOCache(capacity: Int) extends AbstractCache {
           mem_io.data_be := "b1111".U
           mem_io.data_we := false.B
         }
-        core_io.data_gnt := false.B
       }
     }
 
@@ -93,17 +85,7 @@ class FIFOCache(capacity: Int) extends AbstractCache {
     }
 
     is(CACHE_STATE.WRITE) {
-      when(mem_io.data_gnt) {
-        core_io.data_gnt := reqCoreGnt
-        // If it was a read hit, core_io.data_rdata already set above; for write, we don't care.
-        state := CACHE_STATE.IDLE
-      }.otherwise {
-        mem_io.data_req := true.B
-        mem_io.data_addr := reqAddr
-        mem_io.data_be := reqBe
-        mem_io.data_we := reqWe
-        mem_io.data_wdata := reqWdata
-      }
+      state := CACHE_STATE.IDLE
     }
   }
 }

@@ -8,9 +8,8 @@ import RISCV.model._
 class SimplePackedUnit extends AbstractExecutionUnit {
   io.misa := "b01__0000__0_00000_00000_00000_10000_00000".U
 
-  // Default outputs
   io_pc.pc_we := false.B
-  io_pc.pc_wdata := 0.U
+  io_pc.pc_wdata := io_pc.pc + 4.U
   io_data.data_req := false.B
   io_data.data_addr := 0.U
   io_data.data_be := 0.U
@@ -36,113 +35,103 @@ class SimplePackedUnit extends AbstractExecutionUnit {
   )
   io.valid := supported.map(_ === io.instr_type).reduce(_ || _)
 
-  val cycle = RegInit(0.U(2.W))
-  val result = Reg(UInt(32.W))
-  val busy = RegInit(false.B)
-
-  io.stall := Mux(busy, STALL_REASON.EXECUTION_UNIT, STALL_REASON.NO_STALL)
-
   val rs1_addr = io.instr(19, 15)
   val rs2_addr = io.instr(24, 20)
   val rd_addr = io.instr(11, 7)
-  val imm12 = io.instr(31, 20) // 12-bit immediate
 
-  io_reg.reg_rs1 := Mux(busy, 0.U, rs1_addr)
-  io_reg.reg_rs2 := Mux(busy, 0.U, rs2_addr)
-  io_reg.reg_rd := Mux(busy, 0.U, rd_addr)
-  io_reg.reg_write_en := !busy && cycle === 0.U
-  io_reg.reg_write_data := result
+  val isImmediate =
+    io.instr_type === RISCV_TYPE.pli_b ||
+      io.instr_type === RISCV_TYPE.pli_h ||
+      io.instr_type === RISCV_TYPE.plui_h
 
-  when(io.valid && !busy) {
-    busy := true.B
-    cycle := 1.U
+  io.stall := STALL_REASON.NO_STALL
+  io_pc.pc_we := io.valid
+  io_reg.reg_rs1 := Mux(isImmediate, 0.U, rs1_addr)
+  io_reg.reg_rs2 := Mux(isImmediate, 0.U, rs2_addr)
+  io_reg.reg_rd := rd_addr
+  io_reg.reg_write_en := io.valid
+
+  def sat8(x: SInt): UInt =
+    Mux(x > 127.S, "h7f".U, Mux(x < -128.S, "h80".U, x.asUInt(7, 0)))
+  def sat16(x: SInt): UInt =
+    Mux(x > 32767.S, "h7fff".U, Mux(x < -32768.S, "h8000".U, x.asUInt(15, 0)))
+  def avg8(a: UInt, b: UInt): UInt = ((a.asSInt +& b.asSInt) >> 1).asUInt(7, 0)
+  def avg16(a: UInt, b: UInt): UInt =
+    ((a.asSInt +& b.asSInt) >> 1).asUInt(15, 0)
+
+  val rs1 = io_reg.reg_read_data1
+  val rs2 = io_reg.reg_read_data2
+  val imm8 = io.instr(27, 20)
+  val imm10 = Cat(io.instr(20), io.instr(29, 21))
+  val pluiImm = (imm10.asSInt.pad(16).asUInt << 6)(15, 0)
+
+  val byteResult = Wire(Vec(4, UInt(8.W)))
+  val halfResult = Wire(Vec(2, UInt(16.W)))
+  for (i <- 0 until 4) {
+    val a = rs1(8 * i + 7, 8 * i)
+    val b = Mux(
+      io.instr_type === RISCV_TYPE.padd_bs,
+      rs2(7, 0),
+      rs2(8 * i + 7, 8 * i)
+    )
+    byteResult(i) := MuxCase(
+      a,
+      Seq(
+        (io.instr_type === RISCV_TYPE.padd_b || io.instr_type === RISCV_TYPE.padd_bs) -> (a +& b)(
+          7,
+          0
+        ),
+        (io.instr_type === RISCV_TYPE.psub_b) -> (a -& b)(7, 0),
+        (io.instr_type === RISCV_TYPE.psadd_b) -> sat8(a.asSInt +& b.asSInt),
+        (io.instr_type === RISCV_TYPE.paadd_b) -> avg8(a, b)
+      )
+    )
+  }
+  for (i <- 0 until 2) {
+    val a = rs1(16 * i + 15, 16 * i)
+    val b = Mux(
+      io.instr_type === RISCV_TYPE.padd_hs,
+      rs2(15, 0),
+      rs2(16 * i + 15, 16 * i)
+    )
+    halfResult(i) := MuxCase(
+      a,
+      Seq(
+        (io.instr_type === RISCV_TYPE.padd_h || io.instr_type === RISCV_TYPE.padd_hs) -> (a +& b)(
+          15,
+          0
+        ),
+        (io.instr_type === RISCV_TYPE.psub_h) -> (a -& b)(15, 0),
+        (io.instr_type === RISCV_TYPE.psadd_h) -> sat16(a.asSInt +& b.asSInt),
+        (io.instr_type === RISCV_TYPE.paadd_h) -> avg16(a, b)
+      )
+    )
   }
 
-  when(busy) {
-    def sat8(x: UInt): UInt =
-      Mux(x.asSInt > 127.S, 127.U, Mux(x.asSInt < -128.S, 128.U, x(7, 0)))
-    def avg8(x: UInt, y: UInt): UInt = (x +& y) >> 1
-    def sat16(x: UInt): UInt = Mux(
-      x.asSInt > 32767.S,
-      32767.U,
-      Mux(x.asSInt < -32768.S, 32768.U, x(15, 0))
+  io_reg.reg_write_data := MuxCase(
+    0.U,
+    Seq(
+      (io.instr_type === RISCV_TYPE.pli_b) -> Fill(4, imm8),
+      (io.instr_type === RISCV_TYPE.pli_h) -> Fill(
+        2,
+        imm10.asSInt.pad(16).asUInt
+      ),
+      (io.instr_type === RISCV_TYPE.plui_h) -> Fill(2, pluiImm),
+      (io.instr_type === RISCV_TYPE.padd_b) -> byteResult.asUInt,
+      (io.instr_type === RISCV_TYPE.padd_bs) -> byteResult.asUInt,
+      (io.instr_type === RISCV_TYPE.psub_b) -> byteResult.asUInt,
+      (io.instr_type === RISCV_TYPE.psadd_b) -> byteResult.asUInt,
+      (io.instr_type === RISCV_TYPE.paadd_b) -> byteResult.asUInt,
+      (io.instr_type === RISCV_TYPE.padd_h) -> halfResult.asUInt,
+      (io.instr_type === RISCV_TYPE.padd_hs) -> halfResult.asUInt,
+      (io.instr_type === RISCV_TYPE.psub_h) -> halfResult.asUInt,
+      (io.instr_type === RISCV_TYPE.psadd_h) -> halfResult.asUInt,
+      (io.instr_type === RISCV_TYPE.paadd_h) -> halfResult.asUInt
     )
-    def avg16(x: UInt, y: UInt): UInt = (x +& y) >> 1
+  )
 
-    switch(io.instr_type) {
-      is(RISCV_TYPE.pli_b, RISCV_TYPE.pli_h, RISCV_TYPE.plui_h) {
-        when(cycle === 1.U) {
-          // PLI.B: sign-extend 8-bit from imm12(7,0)
-          val imm8 = imm12(7, 0)
-          val imm16 = Cat(Fill(4, imm12(11)), imm12).asSInt
-            .pad(32)
-            .asUInt // sign-extend 12->16 then 16->32
-          result := MuxCase(
-            0.U,
-            Seq(
-              (io.instr_type === RISCV_TYPE.pli_b) -> (imm8.asSInt
-                .pad(32)
-                .asUInt),
-              (io.instr_type === RISCV_TYPE.pli_h) -> imm16,
-              (io.instr_type === RISCV_TYPE.plui_h) -> (imm12 << 16)
-            )
-          )
-          cycle := 0.U; busy := false.B
-        }
-      }
-      // Packed arithmetic (same as before, but unchanged)
-      is(
-        RISCV_TYPE.padd_b,
-        RISCV_TYPE.padd_h,
-        RISCV_TYPE.padd_bs,
-        RISCV_TYPE.padd_hs,
-        RISCV_TYPE.psub_b,
-        RISCV_TYPE.psub_h,
-        RISCV_TYPE.psadd_b,
-        RISCV_TYPE.psadd_h,
-        RISCV_TYPE.paadd_b,
-        RISCV_TYPE.paadd_h
-      ) {
-        when(cycle === 1.U) {
-          val rs1 = io_reg.reg_read_data1
-          val rs2 = io_reg.reg_read_data2
-          var tmp = 0.U(32.W)
-          for (i <- 0 until 32 by 8) {
-            val a = rs1(i + 7, i)
-            val b = rs2(i + 7, i)
-            val out8 = MuxCase(
-              a,
-              Seq(
-                (io.instr_type === RISCV_TYPE.padd_b) -> (a +& b)(7, 0),
-                (io.instr_type === RISCV_TYPE.psub_b) -> (a -& b)(7, 0),
-                (io.instr_type === RISCV_TYPE.psadd_b) -> sat8(a +& b),
-                (io.instr_type === RISCV_TYPE.paadd_b) -> avg8(a, b),
-                (io.instr_type === RISCV_TYPE.padd_bs) -> (a +& b)(7, 0),
-                (io.instr_type === RISCV_TYPE.padd_hs) -> (a +& b)(7, 0)
-              )
-            )
-            tmp = tmp | (out8 << i)
-          }
-          for (i <- 0 until 32 by 16) {
-            val a = rs1(i + 15, i)
-            val b = rs2(i + 15, i)
-            val out16 = MuxCase(
-              a,
-              Seq(
-                (io.instr_type === RISCV_TYPE.padd_h) -> (a +& b)(15, 0),
-                (io.instr_type === RISCV_TYPE.psub_h) -> (a -& b)(15, 0),
-                (io.instr_type === RISCV_TYPE.psadd_h) -> sat16(a +& b),
-                (io.instr_type === RISCV_TYPE.paadd_h) -> avg16(a, b),
-                (io.instr_type === RISCV_TYPE.padd_bs) -> (a +& b)(15, 0),
-                (io.instr_type === RISCV_TYPE.padd_hs) -> (a +& b)(15, 0)
-              )
-            )
-            tmp = (tmp & ~(0xffff.U << i)) | (out16 << i)
-          }
-          result := tmp
-          cycle := 0.U; busy := false.B
-        }
-      }
-    }
+  when(~io_reset.rst_n) {
+    io_pc.pc_we := false.B
+    io_reg.reg_write_en := false.B
   }
 }

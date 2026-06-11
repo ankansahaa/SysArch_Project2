@@ -24,20 +24,24 @@ class Prefetcher extends AbstractCache {
   val readReq =
     core_io.data_req && !core_io.data_we && core_io.data_gnt === false.B && state === idle
   when(readReq) {
+    val diff = core_io.data_addr - lastAddr(0)
+    when(
+      lastAddr(1) =/= 0.U && lastAddr(0) =/= 0.U &&
+        lastAddr(0) - lastAddr(1) === diff
+    ) {
+      lastDiff := diff
+    }.otherwise {
+      lastDiff := 0.U
+    }
     lastAddr(2) := lastAddr(1)
     lastAddr(1) := lastAddr(0)
     lastAddr(0) := core_io.data_addr
-    when(
-      lastAddr(1) - lastAddr(2) === lastAddr(0) - lastAddr(1) &&
-        lastAddr(2) =/= 0.U && lastAddr(1) =/= 0.U && lastAddr(0) =/= 0.U
-    ) {
-      lastDiff := lastAddr(0) - lastAddr(1)
-    }
   }
 
   val patternReady = lastDiff =/= 0.U && state === idle && !core_io.data_req
   when(patternReady) {
     prefetchAddr := lastAddr(0) + lastDiff
+    lastDiff := 0.U
     state := prefetch
   }
 
@@ -70,17 +74,12 @@ class Prefetcher extends AbstractCache {
     }
 
     is(waitCore) {
-      when(!mem_io.data_req || mem_io.data_gnt) {
-        mem_io.data_req := true.B
-        mem_io.data_addr := core_io.data_addr
-        mem_io.data_be := core_io.data_be
-        mem_io.data_we := core_io.data_we
-        mem_io.data_wdata := core_io.data_wdata
-        when(mem_io.data_gnt) {
-          core_io.data_gnt := true.B
-          core_io.data_rdata := mem_io.data_rdata
-          state := idle
-        }
+      mem_io.data_req := true.B
+      mem_io.data_addr := prefetchAddr
+      mem_io.data_be := "b1111".U
+      mem_io.data_we := false.B
+      when(mem_io.data_gnt) {
+        state := idle
       }
     }
   }

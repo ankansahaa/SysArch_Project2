@@ -9,8 +9,13 @@ import RISCV.model._
 class ControlUnit extends AbstractControlUnit {
   val stalled = WireInit(STALL_REASON.NO_STALL)
   val was_stalled = RegInit(STALL_REASON.NO_STALL)
+  // Load FSM: 0 = issue request / wait for grant,
+  //           1 = hold (grant has been seen, request stays high one cycle),
+  //           2 = write back and retire.
+  val load_state = RegInit(0.U(2.W))
   when(~io_reset.rst_n) {
     was_stalled := STALL_REASON.NO_STALL
+    load_state := 0.U
   }.otherwise {
     was_stalled := stalled
   }
@@ -29,20 +34,76 @@ class ControlUnit extends AbstractControlUnit {
 
   io_ctrl.next_pc_select := NEXT_PC_SELECT.PC_PLUS_4
 
-  when(was_stalled === STALL_REASON.EXECUTION_UNIT) {
+  val opcode = RISCV_TYPE.getOP(io_ctrl.instr_type)
+  val funct3 = RISCV_TYPE.getFunct3(io_ctrl.instr_type)
+
+  when(opcode === RISCV_OP.LOAD) {
+    // Keep the address (rs1 + imm) on the ALU during the whole access.
+    io_ctrl.alu_control := ALU_CONTROL.ADD
+    io_ctrl.alu_op_1_sel := ALU_OP_1_SEL.RS1
+    io_ctrl.alu_op_2_sel := ALU_OP_2_SEL.IMM
+    switch(load_state) {
+      is(0.U) {
+        stalled := STALL_REASON.EXECUTION_UNIT
+        io_ctrl.data_req := true.B
+        io_ctrl.data_we := false.B
+        io_ctrl.data_be := MuxCase(
+          0.U(4.W),
+          Seq(
+            (funct3 === RISCV_FUNCT3.F000) -> 1.U(4.W),
+            (funct3 === RISCV_FUNCT3.F100) -> 1.U(4.W),
+            (funct3 === RISCV_FUNCT3.F001) -> 3.U(4.W),
+            (funct3 === RISCV_FUNCT3.F101) -> 3.U(4.W),
+            (funct3 === RISCV_FUNCT3.F010) -> 15.U(4.W)
+          )
+        )
+        when(io_ctrl.data_gnt) {
+          load_state := 1.U
+        }
+      }
+      is(1.U) {
+        stalled := STALL_REASON.EXECUTION_UNIT
+        load_state := 2.U
+      }
+      is(2.U) {
+        stalled := STALL_REASON.NO_STALL
+        io_ctrl.reg_we := true.B
+        switch(funct3) {
+          is(RISCV_FUNCT3.F000, RISCV_FUNCT3.F001) {
+            io_ctrl.reg_write_sel := REG_WRITE_SEL.MEM_OUT_SIGN_EXTENDED
+          }
+          is(RISCV_FUNCT3.F010, RISCV_FUNCT3.F100, RISCV_FUNCT3.F101) {
+            io_ctrl.reg_write_sel := REG_WRITE_SEL.MEM_OUT_ZERO_EXTENDED
+          }
+        }
+        load_state := 0.U
+      }
+    }
+  }.elsewhen(was_stalled === STALL_REASON.EXECUTION_UNIT) {
     when(io_ctrl.data_gnt) {
       stalled := STALL_REASON.NO_STALL
+    }.otherwise {
+      // The grant has not arrived yet: keep stalling and keep the store
+      // request active (req must stay high until gnt).
+      stalled := STALL_REASON.EXECUTION_UNIT
+      io_ctrl.alu_control := ALU_CONTROL.ADD
+      io_ctrl.alu_op_1_sel := ALU_OP_1_SEL.RS1
+      io_ctrl.alu_op_2_sel := ALU_OP_2_SEL.IMM
+      io_ctrl.data_req := true.B
+      io_ctrl.data_we := true.B
+      io_ctrl.data_be := Fill(2, funct3.asUInt(1)) ## funct3
+        .asUInt(1, 0)
+        .orR ## 1.U(1.W)
     }
   }.otherwise {
-    switch(RISCV_TYPE.getOP(io_ctrl.instr_type)) {
+    switch(opcode) {
       is(RISCV_OP.OP_IMM) {
         stalled := STALL_REASON.NO_STALL
         io_ctrl.reg_we := true.B
         io_ctrl.reg_write_sel := REG_WRITE_SEL.ALU_OUT
         io_ctrl.alu_control := ALU_CONTROL(
-          RISCV_TYPE.getFunct7(io_ctrl.instr_type).asUInt(5) ## RISCV_TYPE
-            .getFunct3(io_ctrl.instr_type)
-            .asUInt
+          RISCV_TYPE.getFunct7(io_ctrl.instr_type).asUInt(5) ##
+            RISCV_TYPE.getFunct3(io_ctrl.instr_type).asUInt
         )
         io_ctrl.alu_op_1_sel := ALU_OP_1_SEL.RS1
         io_ctrl.alu_op_2_sel := ALU_OP_2_SEL.IMM
@@ -52,9 +113,8 @@ class ControlUnit extends AbstractControlUnit {
         io_ctrl.reg_we := true.B
         io_ctrl.reg_write_sel := REG_WRITE_SEL.ALU_OUT
         io_ctrl.alu_control := ALU_CONTROL(
-          RISCV_TYPE.getFunct7(io_ctrl.instr_type).asUInt(5) ## RISCV_TYPE
-            .getFunct3(io_ctrl.instr_type)
-            .asUInt
+          RISCV_TYPE.getFunct7(io_ctrl.instr_type).asUInt(5) ##
+            RISCV_TYPE.getFunct3(io_ctrl.instr_type).asUInt
         )
         io_ctrl.alu_op_1_sel := ALU_OP_1_SEL.RS1
         io_ctrl.alu_op_2_sel := ALU_OP_2_SEL.RS2
@@ -75,12 +135,11 @@ class ControlUnit extends AbstractControlUnit {
       is(RISCV_OP.BRANCH) {
         stalled := STALL_REASON.NO_STALL
         io_ctrl.reg_we := false.B
-        io_ctrl.reg_write_sel := REG_WRITE_SEL.ALU_OUT // don't care
+        io_ctrl.reg_write_sel := REG_WRITE_SEL.ALU_OUT
         io_ctrl.alu_control := ALU_CONTROL(
-          (~RISCV_TYPE.getFunct3(io_ctrl.instr_type).asUInt(2)) ## Fill(
-            1,
-            0.U
-          ) ## RISCV_TYPE.getFunct3(io_ctrl.instr_type).asUInt(2, 1)
+          (~RISCV_TYPE.getFunct3(io_ctrl.instr_type).asUInt(2)) ##
+            Fill(1, 0.U) ##
+            RISCV_TYPE.getFunct3(io_ctrl.instr_type).asUInt(2, 1)
         )
         io_ctrl.alu_op_1_sel := ALU_OP_1_SEL.RS1
         io_ctrl.alu_op_2_sel := ALU_OP_2_SEL.RS2
@@ -94,12 +153,24 @@ class ControlUnit extends AbstractControlUnit {
         io_ctrl.reg_we := false.B
         io_ctrl.data_req := true.B
         io_ctrl.data_we := true.B
-        io_ctrl.data_be := Fill(
-          2,
-          RISCV_TYPE.getFunct3(io_ctrl.instr_type).asUInt(1)
-        ) ## RISCV_TYPE.getFunct3(io_ctrl.instr_type).asUInt(1, 0).orR ## 1.U(
-          1.W
-        )
+        io_ctrl.data_be := Fill(2, funct3.asUInt(1)) ## funct3
+          .asUInt(1, 0)
+          .orR ## 1.U(1.W)
+      }
+      is(RISCV_OP.JAL) {
+        stalled := STALL_REASON.NO_STALL
+        io_ctrl.reg_we := true.B
+        io_ctrl.reg_write_sel := REG_WRITE_SEL.PC_PLUS_4
+        io_ctrl.next_pc_select := NEXT_PC_SELECT.IMM
+      }
+      is(RISCV_OP.JALR) {
+        stalled := STALL_REASON.NO_STALL
+        io_ctrl.reg_we := true.B
+        io_ctrl.reg_write_sel := REG_WRITE_SEL.PC_PLUS_4
+        io_ctrl.alu_control := ALU_CONTROL.ADD
+        io_ctrl.alu_op_1_sel := ALU_OP_1_SEL.RS1
+        io_ctrl.alu_op_2_sel := ALU_OP_2_SEL.IMM
+        io_ctrl.next_pc_select := NEXT_PC_SELECT.ALU_OUT_ALIGNED
       }
     }
   }

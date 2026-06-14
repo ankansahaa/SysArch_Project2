@@ -1,7 +1,8 @@
 # Contributions
 
-Briefly describe how each team member has contributed to the project. It goes without saying that every team members should have a good grasp of all parts of the submission.
+Team members:
+- Member 1 (email@example.com) – implemented Tasks 2, 3, 4
+- Member 2 (email@example.com) – implemented Tasks 5, 6
 
-# Use of AI tools
-
-Did you use any AI tools for the project? If so, which tools did you use?
+AI usage:
+We used ChatGPT to help debug Chisel syntax and generate the FIFO cache implementation.

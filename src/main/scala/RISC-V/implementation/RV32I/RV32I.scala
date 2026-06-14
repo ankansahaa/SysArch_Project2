@@ -63,6 +63,15 @@ class RV32I(
   io_reg.reg_write_en := control_unit.io_ctrl.reg_we
   io_reg.reg_write_data := 0.U
 
+  // Latch the memory read data when the grant arrives, since the write-back
+  // of a load happens some cycles after the bus transaction has finished.
+  val load_data = RegInit(0.U(32.W))
+  when(~io_reset.rst_n) {
+    load_data := 0.U
+  }.elsewhen(io_data.data_gnt && !io_data.data_we) {
+    load_data := io_data.data_rdata
+  }
+
   switch(control_unit.io_ctrl.reg_write_sel) {
     is(REG_WRITE_SEL.ALU_OUT) {
       io_reg.reg_write_data := alu.io_alu.result
@@ -75,7 +84,7 @@ class RV32I(
     }
     // ----- Load instructions: zero-extended -----
     is(REG_WRITE_SEL.MEM_OUT_ZERO_EXTENDED) {
-      val raw = io_data.data_rdata
+      val raw = load_data
       when(RISCV_TYPE.getFunct3(instr_type) === RISCV_FUNCT3.F010) {
         io_reg.reg_write_data := raw
       }.elsewhen(RISCV_TYPE.getFunct3(instr_type) === RISCV_FUNCT3.F100) {
@@ -86,7 +95,7 @@ class RV32I(
     }
     // ----- Load instructions: sign-extended -----
     is(REG_WRITE_SEL.MEM_OUT_SIGN_EXTENDED) {
-      val raw = io_data.data_rdata
+      val raw = load_data
       when(RISCV_TYPE.getFunct3(instr_type) === RISCV_FUNCT3.F000) {
         io_reg.reg_write_data := raw(7, 0).asSInt.pad(32).asUInt
       }.elsewhen(RISCV_TYPE.getFunct3(instr_type) === RISCV_FUNCT3.F001) {

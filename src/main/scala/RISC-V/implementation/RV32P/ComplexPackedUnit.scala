@@ -47,7 +47,10 @@ class ComplexPackedUnit extends AbstractExecutionUnit {
   val rs1 = io.instr(19, 15)
   val rs2 = io.instr(24, 20)
   val pairRs1 = Cat(rs1(4, 1), 0.U(1.W))
-  val shamt = io.instr(24, 20)
+  // PNCLIPI.H uses a 5-bit immediate in instr[24:20]; for PNCLIPI.B
+  // instr[24] is a fixed 1 and the immediate is only instr[23:20].
+  val shamtH = io.instr(24, 20)
+  val shamtB = io.instr(23, 20)
   val isClip = io.instr_type === RISCV_TYPE.pnclipi_b ||
     io.instr_type === RISCV_TYPE.pnclipi_h ||
     io.instr_type === RISCV_TYPE.pnclipri_b ||
@@ -124,7 +127,7 @@ class ComplexPackedUnit extends AbstractExecutionUnit {
     val words = VecInit(io_reg.reg_read_data1, io_reg.reg_read_data2)
     for (i <- 0 until 4) {
       val h = words(i / 2)(16 * (i % 2) + 15, 16 * (i % 2)).asSInt
-      val shifted = Mux(round.B, roundRightSigned(h, shamt), h >> shamt)
+      val shifted = Mux(round.B, roundRightSigned(h, shamtB), h >> shamtB)
       out(i) := clipS8(shifted)
     }
     out.asUInt
@@ -135,7 +138,7 @@ class ComplexPackedUnit extends AbstractExecutionUnit {
     val words = VecInit(io_reg.reg_read_data1, io_reg.reg_read_data2)
     for (i <- 0 until 2) {
       val w = words(i).asSInt
-      val shifted = Mux(round.B, roundRightSigned(w, shamt), w >> shamt)
+      val shifted = Mux(round.B, roundRightSigned(w, shamtH), w >> shamtH)
       out(i) := clipS16(shifted)
     }
     out.asUInt

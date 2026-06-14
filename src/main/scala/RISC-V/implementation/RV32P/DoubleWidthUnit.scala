@@ -48,7 +48,10 @@ class DoubleWidthUnit extends AbstractExecutionUnit {
   val lowSaved = RegInit(0.U(32.W))
   val highSaved = RegInit(0.U(32.W))
 
-  val rd = io.instr(11, 7)
+  // The destination is always an even-aligned register pair. The encoded
+  // rd LSB is a fixed bit (0 for the .D instructions, 1 for PWADD/PWADDA),
+  // so the pair base is instr[11:8] << 1.
+  val rd = Cat(io.instr(11, 8), 0.U(1.W))
   val rs1 = io.instr(19, 15)
   val rs2 = io.instr(24, 20)
   val rdHigh = rd + 1.U
@@ -153,21 +156,30 @@ class DoubleWidthUnit extends AbstractExecutionUnit {
     )
 
   def widenByte(a: UInt, b: UInt): (UInt, UInt) = {
-    val sums = (0 until 4).map(i => a(8 * i + 7, 8 * i) +& b(8 * i + 7, 8 * i))
-    val lanes = sums.map(sum => Cat(0.U(7.W), sum))
+    // Signed widening: each int8 + int8 sum becomes an int16 lane.
+    val sums = (0 until 4).map(i =>
+      a(8 * i + 7, 8 * i).asSInt +& b(8 * i + 7, 8 * i).asSInt
+    )
+    val lanes = sums.map(sum => sum.pad(16).asUInt(15, 0))
     (Cat(lanes(1), lanes(0)), Cat(lanes(3), lanes(2)))
   }
 
   def widenHalf(a: UInt, b: UInt): (UInt, UInt) = {
-    val sums =
-      (0 until 2).map(i => a(16 * i + 15, 16 * i) +& b(16 * i + 15, 16 * i))
-    (Cat(0.U(15.W), sums(0)), Cat(0.U(15.W), sums(1)))
+    // Signed widening: each int16 + int16 sum becomes an int32 result.
+    val sums = (0 until 2).map(i =>
+      a(16 * i + 15, 16 * i).asSInt +& b(16 * i + 15, 16 * i).asSInt
+    )
+    (sums(0).pad(32).asUInt(31, 0), sums(1).pad(32).asUInt(31, 0))
   }
 
-  val imm8 = Fill(4, io.instr(27, 20))
-  val imm10 = Cat(io.instr(20), io.instr(29, 21))
+  // PLI.DB:  imm[7:0] in instr[23:16]
+  // PLI.DH:  imm[8:0] in instr[24:16], imm[9] in instr[15]
+  // PLUI.DH: imm[9:1] in instr[23:15], imm[0] in instr[24]
+  val imm8 = Fill(4, io.instr(23, 16))
+  val imm10 = Cat(io.instr(15), io.instr(24, 16))
+  val imm10ui = Cat(io.instr(23, 15), io.instr(24))
   val immH = Fill(2, imm10.asSInt.pad(16).asUInt)
-  val immHU = Fill(2, (imm10.asSInt.pad(16).asUInt << 6)(15, 0))
+  val immHU = Fill(2, (imm10ui.asSInt.pad(16).asUInt << 6)(15, 0))
 
   val readA = io_reg.reg_read_data1
   val readB = io_reg.reg_read_data2
@@ -215,8 +227,10 @@ class DoubleWidthUnit extends AbstractExecutionUnit {
   }
 
   when(phase === 1.U) {
-    io_reg.reg_rs1 := Mux(isImm, 0.U, rs1High)
-    io_reg.reg_rs2 := Mux(isImm, 0.U, Mux(isScalar, rs2, rs2High))
+    // Widening instructions read both single-register sources in the first
+    // cycle, so there is nothing left to read here.
+    io_reg.reg_rs1 := Mux(isImm || isWiden, 0.U, rs1High)
+    io_reg.reg_rs2 := Mux(isImm || isWiden, 0.U, Mux(isScalar, rs2, rs2High))
     io_reg.reg_rd := rdHigh
     io_reg.reg_write_en := !isAcc
     io_reg.reg_write_data := Mux(isWiden, highSaved, currentResult)
@@ -227,8 +241,19 @@ class DoubleWidthUnit extends AbstractExecutionUnit {
       io_reg.reg_rs2 := rdHigh
       io_reg.reg_rd := rd
       io_reg.reg_write_en := true.B
-      io_reg.reg_write_data := lowSaved + readA
-      highSaved := highSaved + readB
+      // PWADDA.B accumulates per 16-bit lane, PWADDA.H per 32-bit register.
+      val isByteAcc = io.instr_type === RISCV_TYPE.pwadda_b
+      def accAdd(acc: UInt, inc: UInt): UInt =
+        Mux(
+          isByteAcc,
+          Cat(
+            (acc(31, 16) + inc(31, 16))(15, 0),
+            (acc(15, 0) + inc(15, 0))(15, 0)
+          ),
+          acc + inc
+        )
+      io_reg.reg_write_data := accAdd(readA, lowSaved)
+      highSaved := accAdd(readB, highSaved)
       phase := 2.U
     }.otherwise {
       phase := 0.U

@@ -61,9 +61,13 @@ class SimplePackedUnit extends AbstractExecutionUnit {
 
   val rs1 = io_reg.reg_read_data1
   val rs2 = io_reg.reg_read_data2
-  val imm8 = io.instr(27, 20)
-  val imm10 = Cat(io.instr(20), io.instr(29, 21))
-  val pluiImm = (imm10.asSInt.pad(16).asUInt << 6)(15, 0)
+  // PLI.B:  imm[7:0] in instr[23:16]
+  // PLI.H:  imm[8:0] in instr[24:16], imm[9] in instr[15]
+  // PLUI.H: imm[9:1] in instr[23:15], imm[0] in instr[24]
+  val imm8 = io.instr(23, 16)
+  val imm10 = Cat(io.instr(15), io.instr(24, 16))
+  val imm10ui = Cat(io.instr(23, 15), io.instr(24))
+  val pluiImm = (imm10ui.asSInt.pad(16).asUInt << 6)(15, 0)
 
   val byteResult = Wire(Vec(4, UInt(8.W)))
   val halfResult = Wire(Vec(2, UInt(16.W)))

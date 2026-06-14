@@ -83,4 +83,10 @@ class Prefetcher extends AbstractCache {
       }
     }
   }
+
+  when(~io_reset.rst_n) {
+    state := idle
+    lastAddr := VecInit(Seq.fill(3)(0.U(32.W)))
+    lastDiff := 0.U
+  }
 }
